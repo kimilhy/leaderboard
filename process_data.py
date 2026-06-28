@@ -173,8 +173,11 @@ def process(filepath="27.06.xlsx", min_lap_time=10.0, max_lap_time=70.0):
             "tries": pilot_try_list,
         })
 
-    # Sort by avg lap time (ascending → faster = better)
-    results.sort(key=lambda r: r["avg_lap"])
+    # Sort by best 3 consecutive avg (ascending → faster = better), fallback to avg lap
+    results.sort(key=lambda r: (
+        r["best_consecutive_3"]["avg"] if r["best_consecutive_3"] else float("inf"),
+        r["avg_lap"],
+    ))
 
     output = {
         "source": filepath,
