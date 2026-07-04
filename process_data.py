@@ -32,7 +32,6 @@ def load_data(filepath):
             "lap_number": int(row[4]),
             "length": parse_time(row[5]),
             "race_time": parse_time(row[6]),
-            "valid_xlsx": str(row[7]).strip() == "True",
         })
     return laps
 
@@ -86,36 +85,47 @@ def best_consecutive_in_try(laps, count=3):
     }
 
 
-def process(filepath="27.06.xlsx", min_lap_time=10.0, max_lap_time=70.0):
+def process(filepath, min_lap_time=10.0, max_lap_time=70.0):
     """
     Main processing pipeline.
 
+    Filtering is purely physics-based — the XLSX "Valid" column is ignored.
     min_lap_time: laps faster than this are physically impossible (sensor errors)
-    max_lap_time: laps slower than this are likely crashes/recoveries
+    max_lap_time: laps slower than this are crashes/recoveries
     """
     all_laps = load_data(filepath)
 
-    # Step 1: Remove laps marked False in XLSX
-    valid_laps = [l for l in all_laps if l["valid_xlsx"]]
-
-    # Step 2: Remove physically impossible laps (hard min/max cutoffs)
-    filtered = [l for l in valid_laps if min_lap_time <= l["length"] <= max_lap_time]
-    hard_removed = len(valid_laps) - len(filtered)
+    # Step 1: Remove physically impossible laps (hard min/max cutoffs)
+    filtered = [l for l in all_laps if min_lap_time <= l["length"] <= max_lap_time]
+    hard_removed = len(all_laps) - len(filtered)
     if hard_removed:
         print(f"Hard min/max filter ({min_lap_time}s–{max_lap_time}s): removed {hard_removed} physically impossible laps")
 
-    # Step 3: Group into tries: (pilot, round, race)
+    # Step 2: Group into tries: (pilot, round, race)
     tries = defaultdict(list)
     for lap in filtered:
         key = (lap["pilot"], lap["round"], lap["race"])
         tries[key].append(lap)
 
+    # Step 3: Deduplicate same lap number within a try (keep shortest time)
+    deduped_tries = {}
+    dupe_count = 0
+    for key, try_laps in tries.items():
+        best = {}
+        for l in try_laps:
+            if l["lap_number"] not in best or l["length"] < best[l["lap_number"]]["length"]:
+                best[l["lap_number"]] = l
+        dupe_count += len(try_laps) - len(best)
+        deduped_tries[key] = list(best.values())
+    if dupe_count:
+        print(f"Dedup duplicate lap numbers: removed {dupe_count}")
+
     # Step 4: Remove statistical outliers per try
     cleaned_tries = {}
-    for key, try_laps in tries.items():
+    for key, try_laps in deduped_tries.items():
         cleaned_tries[key] = remove_outliers_iqr(try_laps)
 
-    total_before_iqr = sum(len(v) for v in tries.values())
+    total_before_iqr = sum(len(v) for v in deduped_tries.values())
     total_after_iqr = sum(len(v) for v in cleaned_tries.values())
     iqr_removed = total_before_iqr - total_after_iqr
     if iqr_removed:
@@ -183,8 +193,8 @@ def process(filepath="27.06.xlsx", min_lap_time=10.0, max_lap_time=70.0):
         "source": filepath,
         "config": {"min_lap_time_s": min_lap_time, "max_lap_time_s": max_lap_time},
         "total_laps_raw": len(all_laps),
-        "total_laps_valid_xlsx": len(valid_laps),
         "total_laps_hard_filter_removed": hard_removed,
+        "total_laps_dup_removed": dupe_count,
         "total_laps_iqr_removed": iqr_removed,
         "total_laps_final": sum(r["total_laps"] for r in results),
         "pilots": len(results),
@@ -194,11 +204,22 @@ def process(filepath="27.06.xlsx", min_lap_time=10.0, max_lap_time=70.0):
 
 
 if __name__ == "__main__":
-    data = process("27.06.xlsx")
+    import sys, glob
+    # Accept filename as argument, or auto-detect the only .xlsx in the directory
+    if len(sys.argv) > 1:
+        filepath = sys.argv[1]
+    else:
+        xlsx_files = glob.glob("*.xlsx")
+        if not xlsx_files:
+            sys.exit("No .xlsx file found. Drop one in the directory or pass it as an argument.")
+        if len(xlsx_files) > 1:
+            sys.exit(f"Multiple .xlsx files found: {xlsx_files}. Pass the one to use as an argument.")
+        filepath = xlsx_files[0]
+    data = process(filepath)
     with open("data.json", "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     print(f"Processed {data['total_laps_raw']} total laps → {data['total_laps_final']} clean laps")
-    print(f"  Valid=XLSX: {data['total_laps_valid_xlsx']} | Hard-filter: {data['total_laps_hard_filter_removed']} | IQR: {data['total_laps_iqr_removed']}")
+    print(f"  Hard-filter: {data['total_laps_hard_filter_removed']} | Dupes: {data['total_laps_dup_removed']} | IQR: {data['total_laps_iqr_removed']}")
     print(f"Pilots: {data['pilots']}")
     for r in data["results"]:
         b3 = r["best_consecutive_3"]
